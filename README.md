@@ -27,5 +27,3 @@ Sample Output
     00> [00:00:03.368,011] <inf> LIS2DUX: X: -2.74,   Y: -1.12,   Z: -9.37
     00> [00:00:04.369,232] <inf> LIS2DUX: X: -2.80,   Y: -0.99,   Z: -9.41
     00> [00:00:05.370,452] <inf> LIS2DUX: X: -2.87,   Y: -0.94,   Z: -9.45
-
-   <Gives out acceleration sensing continuously after every 1 seconds>
