@@ -1,21 +1,19 @@
-# Interfacing_LIS2DUX12_sensor_with_nRF52840
+# Interfacing LIS2DUX12 with nRF52840
 
-Overview
-********
+### Overview
 
 This sample application periodically reads accelerometer data from the
 LIS2DUX12 sensor, and displays the sensor data on the console.
 
-Building and Running
-********************
+### Building and Running
 
-:ref:`nrf58240dk_nrf52840` includes an ST LIS2DUX12 accelerometer which
+`ref: nrf58240dk_nrf52840` includes an ST LIS2DUX12 accelerometer which
 supports the LIS2DUX12 interface.
 
-.. building-commands::
-   :board: nrf58240dk_nrf52840
-   :overlay: nrf_board.overlay
-   :goals: build flash
+.. building-commands:   
+   :board: nrf58240dk_nrf52840   
+   :overlay: nrf_board.overlay   
+   :goals: build flash   
    :compact:
 
 Sample Output
