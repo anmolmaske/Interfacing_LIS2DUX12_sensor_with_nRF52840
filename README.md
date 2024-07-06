@@ -1,0 +1,1 @@
+# Interfacing_LIS2DUX12_sensor_with_nRF52840
