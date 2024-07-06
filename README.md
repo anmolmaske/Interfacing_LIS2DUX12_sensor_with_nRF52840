@@ -1,8 +1,5 @@
 # Interfacing_LIS2DUX12_sensor_with_nRF52840
 
-LIS2DUX12: Acceleration Sensing
-###############################
-
 Overview
 ********
 
@@ -23,8 +20,6 @@ supports the LIS2DUX12 interface.
 
 Sample Output
 =============
-
-.. code-block:: console
 
     00> [00:00:01.364,562] <inf> LIS2DUX: Acceleration measured are as follows:
     00> [00:00:01.365,631] <inf> LIS2DUX: X: -2.61,   Y: -1.47,   Z: -9.14
