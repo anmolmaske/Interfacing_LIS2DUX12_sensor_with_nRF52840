@@ -3,7 +3,8 @@
 ### Overview
 
 This sample application periodically reads accelerometer data from the
-LIS2DUX12 sensor, and displays the sensor data on the console.
+LIS2DUX12 sensor, and displays the sensor data on the console using nRF 
+Connect SDK v2.7.0 and Zaphyr RTOS
 
 ### Building and Running
 
