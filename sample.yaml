@@ -1,0 +1,15 @@
+sample:
+  description: LIS2DUX12 Acceleration
+  name: LIS2DUX12_interface
+common:
+    integration_platforms:
+      - nrf52840dk_nrf52840
+    harness: sensor
+    tags: 
+      - base_app
+    depends_on:
+      - i2c
+
+tests:
+  sample.basic.LIS2DUX12:
+    tags: base_app
