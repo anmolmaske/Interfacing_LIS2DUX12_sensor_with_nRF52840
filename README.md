@@ -10,7 +10,8 @@ LIS2DUX12 sensor, and displays the sensor data on the console.
 `ref: nrf58240dk_nrf52840` includes an ST LIS2DUX12 accelerometer which
 supports the LIS2DUX12 interface.
 
-.. building-commands:   
+
+`building-commands:`   
    :board: nrf58240dk_nrf52840   
    :overlay: nrf_board.overlay   
    :goals: build flash   
