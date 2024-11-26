@@ -1,0 +1,31 @@
+/* 
+ * Un-comment &pinctrl node if using custom board
+ * If your i2c pins are changed, try changing from here 
+ */
+
+&pinctrl {
+    i2c0_default: i2c0_default {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 21)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 19)>;
+        };
+    };
+
+    i2c0_sleep: i2c0_sleep {
+        group1 {
+            psels = <NRF_PSEL(TWIM_SDA, 0, 21)>,
+                    <NRF_PSEL(TWIM_SCL, 0, 19)>;
+            low-power-enable;
+        };
+    };
+};
+
+
+&i2c0 
+{
+	status = "okay";		
+};
+
+&gpio0 {  //For interrupt pin of lis2dux12 sensor
+    status = "okay";
+};
