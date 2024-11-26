@@ -1,1 +1,1 @@
-# Interfacing_LIS2DUX12_sensor_with_nRF52840
+# LIS2DUX12 3-Axis Linear Accelerometer
