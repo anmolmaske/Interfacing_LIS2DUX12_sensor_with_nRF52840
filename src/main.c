@@ -3,7 +3,7 @@
 *
 * \brief LIS2DUX12 Sensor Interfacing
 *
-* \date 2024-11-19
+* \date 2024-12-06
 */
 
 #include <zephyr/kernel.h>
@@ -14,26 +14,33 @@
 #include <zephyr/logging/log.h>
 #include "lis2dux12_reg.h"
 
+#include "switch_monitoring.h"
+#include "vibration_monitoring.h"
+
 LOG_MODULE_REGISTER(lis_sensor);
 
 /* Self-test Threshold Values */
 #define SELF_TEST_MIN_THRESHOLD -5000.0f
 #define SELF_TEST_MAX_THRESHOLD  5000.0f
 
-static double lis_x = 0.0;
-static double lis_y = 0.0;
-static double lis_z = 0.0;
+double lis_x = 0.0;
+double lis_y = 0.0;
+double lis_z = 0.0;
 
-static float low_gx = 0.0f;
-static float low_gy = 0.0f;
-static float low_gz = 0.0f;
+float low_gx = 0.0f;
+float low_gy = 0.0f;
+float low_gz = 0.0f;
 
-static float avg_x = 0.0f;
-static float avg_y = 0.0f;
-static float avg_z = 0.0f;
+float avg_x = 0.0f;
+float avg_y = 0.0f;
+float avg_z = 0.0f;
+
+
+/* User-defined threshold in mg */
+uint16_t motion_threshold_mg = 5;
 
 /* Motion Detection Flag */
-static volatile bool motion_detected = false;
+bool motion_detected = false;
 
 /* I2C Device */
 #define I2C_DEV DT_NODELABEL(i2c0)  // To get i2c LIS sensor
@@ -41,6 +48,7 @@ static const struct device *i2c_dev;
 
 #define INT1_PORT DT_NODELABEL(gpio0) // To get interrupt pin of LIS sensor 
 const struct device *gpio_dev;
+
 
 /* GPIO Pin for LIS2DUX12 Interrupt (INT1 connected to GPIO 16) */
 #define INT1_PIN 16         // Pin 16
@@ -53,35 +61,68 @@ static struct gpio_callback motion_cb_data;
 stmdev_ctx_t lis_ctx;
 uint8_t i2c_address = 0x19; // Address of LIS2DUX12 sensor
 
+
 /* Custom I2C Read/Write Functions */
-static int32_t lis2dux12_i2c_write(void *handle, uint8_t reg, const uint8_t *buf, uint16_t len) {
-    return i2c_burst_write(i2c_dev, i2c_address, reg, buf, len);
+static int32_t lis2dux12_i2c_write(void *handle, uint8_t reg, const uint8_t *data, uint16_t len) {
+    const struct device *i2c_dev = (const struct device *)handle;
+    int ret = i2c_burst_write(i2c_dev, i2c_address, reg, data, len);
+    if (ret < 0) {
+        LOG_ERR("I2C Write Error: %d", ret);
+    }
+    return ret;
 }
 
-static int32_t lis2dux12_i2c_read(void *handle, uint8_t reg, uint8_t *buf, uint16_t len) {
-    return i2c_burst_read(i2c_dev, i2c_address, reg, buf, len);
+static int32_t lis2dux12_i2c_read(void *handle, uint8_t reg, uint8_t *data, uint16_t len) {
+    const struct device *i2c_dev = (const struct device *)handle;
+    int ret = i2c_burst_read(i2c_dev, i2c_address, reg, data, len);
+    if (ret < 0) {
+        LOG_ERR("I2C Read Error: %d", ret);
+    }
+    return ret;
 }
 
 
 /* Initialize the LIS2DUX12 */
 void lis2dux12_init(void) {
-    uint8_t who_am_i;
-    int ret;
 
     i2c_dev = DEVICE_DT_GET(I2C_DEV);
-    // i2c_dev = device_get_binding(DT_LABEL(I2C_DEV));
     if (!device_is_ready(i2c_dev)) {
-        printk("LIS2DUX12 I2C device not ready\n");
+        LOG_INF("LIS2DUX12 I2C device not ready\n");
         return;
     }
 
+    gpio_dev = DEVICE_DT_GET(INT1_PORT);
+    if (!device_is_ready(gpio_dev)) {
+        LOG_INF("Error: Failed to bind INT1 pin to GPIO device.\n");
+        return;
+    }
+
+    uint8_t who_am_i;
+    int ret;
+
     lis_ctx.write_reg = lis2dux12_i2c_write;
     lis_ctx.read_reg = lis2dux12_i2c_read;
-    lis_ctx.handle = NULL;
+    lis_ctx.handle = (void *)i2c_dev;
 
-    ret = lis2dux12_device_id_get(&lis_ctx, &who_am_i);
-    if (ret != 0 || who_am_i != LIS2DUX12_ID) {
-        printk("Failed to initialize LIS2DUX12 sensor\n");
+    /* reset device */
+	ret = lis2dux12_init_set(&lis_ctx, LIS2DUX12_RESET);
+	if (ret < 0) {
+		return ret;
+	}
+    k_msleep(50);
+
+    /* Read WHO_AM_I Register */
+    if ((lis2dux12_device_id_get(&lis_ctx, &who_am_i)) || (who_am_i != LIS2DUX12_ID)) {
+        LOG_ERR("Failed to detect LIS2DUX12 (WHO_AM_I = 0x%02X)", who_am_i);
+        return;
+    } else {
+        LOG_INF("LIS2DUX12 detected (WHO_AM_I = 0x%02X)", who_am_i);
+    }
+
+    /* Configure Sensor */
+    ret = lis2dux12_init_set(&lis_ctx, LIS2DUX12_SENSOR_ONLY_ON);
+    if (ret != 0) {
+        LOG_ERR("Failed to configure LIS2DUX12");
         return;
     }
 
@@ -92,11 +133,51 @@ void lis2dux12_init(void) {
     };
     ret = lis2dux12_mode_set(&lis_ctx, &mode);
     if (ret != 0) {
-        printk("Error: Failed to configure LIS2DUX12 mode.\n");
+        LOG_INF("Error: Failed to configure LIS2DUX12 mode.\n");
         return;
     }
 
-    printk("LIS2DUX12 initialized successfully\n");
+    LOG_INF("LIS2DUX12 initialized successfully\n");
+}
+
+/* If Initilization failed than reinitilize it */
+static void lis2dux12_init_with_retries(void) {
+    uint8_t device_id;
+    int ret;
+    int retries = 5;
+
+    /* Assign the I2C read/write functions to the context */
+    lis_ctx.write_reg = lis2dux12_i2c_write;
+    lis_ctx.read_reg = lis2dux12_i2c_read;
+    lis_ctx.handle = (void *)i2c_dev;
+
+    for (int i = 0; i < retries; i++) {
+        ret = lis2dux12_device_id_get(&lis_ctx, &device_id);
+        if (ret == 0 && device_id == LIS2DUX12_ID) {
+            LOG_INF("LIS2DUX12 Device ID: 0x%02X", device_id);
+            break;
+        }
+
+        LOG_WRN("Retrying LIS2DUX12 initialization (%d/%d)...", i + 1, retries);
+        k_msleep(100); // Wait before retrying
+    }
+
+    if (ret != 0 || device_id != LIS2DUX12_ID) {
+        LOG_ERR("Failed to initialize LIS2DUX12 after %d retries", retries);
+    } else {
+        LOG_INF("LIS2DUX12 initialized successfully.");
+
+        lis2dux12_md_t mode = {
+        .odr = LIS2DUX12_1Hz6_ULP,
+        .fs = LIS2DUX12_4g,
+        .bw = LIS2DUX12_ODR_div_4,
+        };
+        ret = lis2dux12_mode_set(&lis_ctx, &mode);
+        if (ret != 0) {
+            LOG_INF("Error: Failed to configure LIS2DUX12 mode.\n");
+            return;
+        }
+    }
 }
 
 
@@ -134,7 +215,7 @@ void fetch_lis_sensor_values(void) {
 
     int ret = lis2dux12_xl_data_get(&lis_ctx, &mode, &data);
     if (ret != 0) {
-        printk("Failed to fetch data from LIS2DUX12\n");
+        LOG_INF("Failed to fetch data from LIS2DUX12\n");
         return;
     }
 
@@ -257,21 +338,21 @@ bool lis2dux12_self_test(stmdev_ctx_t *ctx) {
     /* Step 1: Configure Sensor Mode */
     ret = lis2dux12_mode_set(ctx, &mode);
     if (ret != 0) {
-        printk("Error: Failed to configure LIS2DUX12 mode\n");
+        LOG_INF("Error: Failed to configure LIS2DUX12 mode\n");
         return false;
     }
 
     /* Step 2: Positive Self-Test */
-    printk("Starting Positive Self-Test...\n");
+    LOG_INF("Starting Positive Self-Test...\n");
     ret = lis2dux12_self_test_sign_set(ctx, LIS2DUX12_XL_ST_POSITIVE);
     if (ret != 0) {
-        printk("Error: Failed to configure positive self-test sign\n");
+        LOG_INF("Error: Failed to configure positive self-test sign\n");
         return false;
     }
 
     ret = lis2dux12_self_test_start(ctx, 2);  // Start self-test
     if (ret != 0) {
-        printk("Error: Failed to start positive self-test\n");
+        LOG_INF("Error: Failed to start positive self-test\n");
         return false;
     }
 
@@ -280,7 +361,7 @@ bool lis2dux12_self_test(stmdev_ctx_t *ctx) {
     /* Read Acceleration Data */
     ret = lis2dux12_xl_data_get(ctx, &mode, &data);
     if (ret != 0) {
-        printk("Error: Failed to fetch positive self-test data\n");
+        LOG_INF("Error: Failed to fetch positive self-test data\n");
         lis2dux12_self_test_stop(ctx);
         return false;
     }
@@ -289,28 +370,28 @@ bool lis2dux12_self_test(stmdev_ctx_t *ctx) {
     axis_reading[1] = data.mg[1];
     axis_reading[2] = data.mg[2];
 
-    printk("Positive Self-Test Readings [mg]: X=%.2f, Y=%.2f, Z=%.2f\n",
+    LOG_INF("Positive Self-Test Readings [mg]: X=%.2f, Y=%.2f, Z=%.2f\n",
            axis_reading[0], axis_reading[1], axis_reading[2]);
 
     /* Check Against Thresholds */
     for (int i = 0; i < 3; i++) {
         if (axis_reading[i] < SELF_TEST_MIN_THRESHOLD || axis_reading[i] > SELF_TEST_MAX_THRESHOLD) {
             test_passed = false;
-            printk("Positive Self-Test Failed on Axis %d: %.2f mg\n", i, axis_reading[i]);
+            LOG_INF("Positive Self-Test Failed on Axis %d: %.2f mg\n", i, axis_reading[i]);
         }
     }
 
     /* Step 3: Negative Self-Test */
-    printk("Starting Negative Self-Test...\n");
+    LOG_INF("Starting Negative Self-Test...\n");
     ret = lis2dux12_self_test_sign_set(ctx, LIS2DUX12_XL_ST_NEGATIVE);
     if (ret != 0) {
-        printk("Error: Failed to configure negative self-test sign\n");
+        LOG_INF("Error: Failed to configure negative self-test sign\n");
         return false;
     }
 
     ret = lis2dux12_self_test_start(ctx, 2);  // Start self-test
     if (ret != 0) {
-        printk("Error: Failed to start negative self-test\n");
+        LOG_INF("Error: Failed to start negative self-test\n");
         return false;
     }
 
@@ -319,7 +400,7 @@ bool lis2dux12_self_test(stmdev_ctx_t *ctx) {
     /* Read Acceleration Data */
     ret = lis2dux12_xl_data_get(ctx, &mode, &data);
     if (ret != 0) {
-        printk("Error: Failed to fetch negative self-test data\n");
+        LOG_INF("Error: Failed to fetch negative self-test data\n");
         lis2dux12_self_test_stop(ctx);
         return false;
     }
@@ -328,21 +409,21 @@ bool lis2dux12_self_test(stmdev_ctx_t *ctx) {
     axis_reading[1] = data.mg[1];
     axis_reading[2] = data.mg[2];
 
-    printk("Negative Self-Test Readings [mg]: X=%.2f, Y=%.2f, Z=%.2f\n",
+    LOG_INF("Negative Self-Test Readings [mg]: X=%.2f, Y=%.2f, Z=%.2f\n",
            axis_reading[0], axis_reading[1], axis_reading[2]);
 
     /* Check Against Thresholds */
     for (int i = 0; i < 3; i++) {
         if (axis_reading[i] < SELF_TEST_MIN_THRESHOLD || axis_reading[i] > SELF_TEST_MAX_THRESHOLD) {
             test_passed = false;
-            printk("Negative Self-Test Failed on Axis %d: %.2f mg\n", i, axis_reading[i]);
+            LOG_INF("Negative Self-Test Failed on Axis %d: %.2f mg\n", i, axis_reading[i]);
         }
     }
 
     /* Step 4: Stop Self-Test */
     ret = lis2dux12_self_test_stop(ctx);
     if (ret != 0) {
-        printk("Error: Failed to stop self-test\n");
+        LOG_INF("Error: Failed to stop self-test\n");
     }
 
     return test_passed;
@@ -350,11 +431,11 @@ bool lis2dux12_self_test(stmdev_ctx_t *ctx) {
 
 /* Start Self-Test of Sensor */
 void perform_self_test(void) {
-    printk("Performing LIS2DUX12 Self-Test...\n");
+    LOG_INF("Performing LIS2DUX12 Self-Test...\n");
     if (lis2dux12_self_test(&lis_ctx)) {
-        printk("LIS2DUX12 Self-Test PASSED!\n");
+        LOG_INF("LIS2DUX12 Self-Test PASSED!\n");
     } else {
-        printk("LIS2DUX12 Self-Test FAILED!\n");
+        LOG_INF("LIS2DUX12 Self-Test FAILED!\n");
     }
 }
 
@@ -365,17 +446,17 @@ int lis2dux12_i2c_power_up_sequence(stmdev_ctx_t *ctx) {
     int ret;
 
     /* Step 1: Send the STATIC ADDRESS with a Write command */
-    ret = lis2dux12_i2c_write(ctx, 0x00, &dummy_data, 1);  // Dummy write to trigger power-up
+    ret = lis2dux12_write_reg(ctx, 0x00, &dummy_data, 1);  // Dummy write to trigger power-up
     if (ret == -EIO) {
         /* NACK is expected during power-up */
-        printk("NACK received. Power-up sequence initiated.\n");
+        LOG_INF("NACK received. Power-up sequence initiated.\n");
     } else if (ret == 0) {
         /* Unexpected ACK */
-        printk("Error: Unexpected ACK during power-up. Device may already be active.\n");
+        LOG_INF("Error: Unexpected ACK during power-up. Device may already be active.\n");
         return -1;
     } else {
         /* Other I2C errors */
-        printk("Error: Failed to send power-up command (I2C error: %d).\n", ret);
+        LOG_INF("Error: Failed to send power-up command (I2C error: %d).\n", ret);
         return -1;
     }
 
@@ -383,13 +464,13 @@ int lis2dux12_i2c_power_up_sequence(stmdev_ctx_t *ctx) {
     k_sleep(K_MSEC(25));  // Wait for the sensor to transition to SOFT_PD
 
     /* Step 3: Verify that the device has transitioned to SOFT_PD */
-    ret = lis2dux12_i2c_write(ctx, 0x00, &dummy_data, 1);
+    ret = lis2dux12_write_reg(ctx, 0x00, &dummy_data, 1);
     if (ret != 0) {
-        printk("Error: Device did not respond after power-up. I2C error: %d\n", ret);
+        LOG_INF("Error: Device did not respond after power-up. I2C error: %d\n", ret);
         return -1;
     }
 
-    printk("Device successfully transitioned to SOFT_PD.\n");
+    LOG_INF("Device successfully transitioned to SOFT_PD.\n");
 
     return 0;
 }
@@ -398,9 +479,9 @@ int lis2dux12_i2c_power_up_sequence(stmdev_ctx_t *ctx) {
 void lis2dux12_sleep(stmdev_ctx_t *ctx) {
     int ret = lis2dux12_enter_deep_power_down(ctx, 1);  // Enable deep power down
     if (ret == 0) {
-        printk("LIS2DUX12 entered deep power down mode successfully.\n");
+        LOG_INF("LIS2DUX12 entered deep power down mode successfully.\n");
     } else {
-        printk("Error: Failed to enter deep power down mode.\n");
+        LOG_INF("Error: Failed to enter deep power down mode.\n");
     }
 }
 
@@ -408,12 +489,12 @@ void lis2dux12_sleep(stmdev_ctx_t *ctx) {
 void lis2dux12_wakeup(stmdev_ctx_t *ctx) {
     int ret;
 
-    printk("Exiting deep power down mode...\n");
+    LOG_INF("Exiting deep power down mode...\n");
 
     /* Perform the I²C-specific power-up sequence */
     ret = lis2dux12_i2c_power_up_sequence(ctx);
     if (ret != 0) {
-        printk("Error: Failed to exit deep power down mode.\n");
+        LOG_INF("Error: Failed to exit deep power down mode.\n");
         return;
     }
 
@@ -421,9 +502,9 @@ void lis2dux12_wakeup(stmdev_ctx_t *ctx) {
     uint8_t who_am_i = 0;
     ret = lis2dux12_device_id_get(ctx, &who_am_i);
     if (ret == 0 && who_am_i == LIS2DUX12_ID) {
-        printk("LIS2DUX12 exited deep power down mode successfully (WHO_AM_I: 0x%X).\n", who_am_i);
+        LOG_INF("LIS2DUX12 exited deep power down mode successfully (WHO_AM_I: 0x%X).\n", who_am_i);
     } else {
-        printk("Error: Failed to communicate with LIS2DUX12 after wake-up.\n");
+        LOG_INF("Error: Failed to communicate with LIS2DUX12 after wake-up.\n");
     }
 
     /* Reinitialize Sensor Configuration */
@@ -434,43 +515,42 @@ void lis2dux12_wakeup(stmdev_ctx_t *ctx) {
     };
     ret = lis2dux12_mode_set(ctx, &mode);
     if (ret != 0) {
-        printk("Error: Failed to reinitialize LIS2DUX12 configuration.\n");
+        LOG_INF("Error: Failed to reinitialize LIS2DUX12 configuration.\n");
     } else {
-        printk("LIS2DUX12 reinitialized successfully.\n");
+        LOG_INF("LIS2DUX12 reinitialized successfully.\n");
     }
 
     k_sleep(K_MSEC(10));
 }
 
 
-
 /* Motion Detection Setup */
-static int lis2dux12_configure_motion_detection(stmdev_ctx_t *ctx, uint16_t motion_threshold_mg) {
+static int lis2dux12_configure_motion_detection(stmdev_ctx_t *ctx) {
     uint8_t who_am_i = 0;
 
     // Verify device ID
     if (lis2dux12_device_id_get(ctx, &who_am_i) != 0 || who_am_i != LIS2DUX12_ID) {
-        printk("Device not recognized\n");
+        LOG_INF("Device not recognized\n");
         return -ENODEV;
     }
     
     // Enable internal pullup on INT1 pin
     uint8_t pin_ctrl_reg = 0x1A;
-    if (lis2dux12_i2c_write(ctx, LIS2DUX12_PIN_CTRL, &pin_ctrl_reg, 1) < 0) {
+    if (lis2dux12_write_reg(ctx, LIS2DUX12_PIN_CTRL, &pin_ctrl_reg, 1) < 0) {
         LOG_ERR("Failed to configure PIN_CTRL");
         return -EIO;
     }
 
     // Enable Interrupts
     uint8_t interrupt_cfg_reg = 0x27;
-    if (lis2dux12_i2c_write(ctx, LIS2DUX12_INTERRUPT_CFG, &interrupt_cfg_reg, 1) < 0) {
+    if (lis2dux12_write_reg(ctx, LIS2DUX12_INTERRUPT_CFG, &interrupt_cfg_reg, 1) < 0) {
         LOG_ERR("Failed to configure INTERRUPT_CFG");
         return -EIO;
     }
 
     // Map wake-up interrupt to INT1
     uint8_t md1_cfg_reg = 0x20;  // Map wake-up to INT1
-    if (lis2dux12_i2c_write(ctx, LIS2DUX12_MD1_CFG, &md1_cfg_reg, 1) < 0) {
+    if (lis2dux12_write_reg(ctx, LIS2DUX12_MD1_CFG, &md1_cfg_reg, 1) < 0) {
         LOG_ERR("Failed to configure MD1_CFG");
         return -EIO;
     }
@@ -479,21 +559,21 @@ static int lis2dux12_configure_motion_detection(stmdev_ctx_t *ctx, uint16_t moti
     uint16_t threshold = motion_threshold_mg / 0.122; // Convert mg to LSB (±4 g scale, 0.122 mg/LSB)
     uint8_t threshold_buf = (uint8_t)(threshold & 0x3F); // WAKE_UP_THS is 6 bits wide
     threshold_buf |= (1 << 6); // Set bit 6 (SLEEP_ON) to 1. This is for activity/inactivity detection
-    if (lis2dux12_i2c_write(ctx, LIS2DUX12_WAKE_UP_THS, &threshold_buf, 1) < 0) {
+    if (lis2dux12_write_reg(ctx, LIS2DUX12_WAKE_UP_THS, &threshold_buf, 1) < 0) {
         LOG_ERR("Failed to set WAKE_UP_THS");
         return -EIO;
     }
 
     // Set wake-up duration (debounce period)
     uint8_t duration = 0x00;  // Example debounce duration
-    if (lis2dux12_i2c_write(ctx, LIS2DUX12_WAKE_UP_DUR, &duration, 1) < 0) {
+    if (lis2dux12_write_reg(ctx, LIS2DUX12_WAKE_UP_DUR, &duration, 1) < 0) {
         LOG_ERR("Failed to set WAKE_UP_DUR");
         return -EIO;
     }
 
     // Configure CTRL1 to enable wakeup detection on all axis
     uint8_t ctrl1_reg = 0x57;
-    if (lis2dux12_i2c_write(ctx, LIS2DUX12_CTRL1, &ctrl1_reg, 1) < 0) {
+    if (lis2dux12_write_reg(ctx, LIS2DUX12_CTRL1, &ctrl1_reg, 1) < 0) {
         LOG_ERR("Failed to configure CTRL1");
         return -EIO;
     }
@@ -505,14 +585,14 @@ static int lis2dux12_configure_motion_detection(stmdev_ctx_t *ctx, uint16_t moti
         return -EIO;
     }
 
-    printk("LIS2DUX12 interrupt1 initialized with threshold: %d mg", motion_threshold_mg);
+    LOG_INF("LIS2DUX12 interrupt1 initialized with threshold: %d mg", motion_threshold_mg);
 
     return 0;
 }
 
 /* Interrupt Callback Function */
 static void motion_detected_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
-    printk("Motion detected! Interrupt triggered...\n");
+    LOG_INF("Motion detected! Interrupt triggered...\n");
     k_sleep(K_MSEC(10));  // Allow RTT to process logs
 
     motion_detected = true;
@@ -523,14 +603,14 @@ void lis2dux12_init_interrupt(void) {
     int ret;
 
     /* Configure GPIO Pin */
-    if (gpio_pin_configure(gpio_dev, INT1_PIN, GPIO_INPUT | INT1_FLAGS) != 0) {
-        printk("Error: Failed to configure GPIO pin %d.\n", INT1_PIN);
+    if (gpio_pin_configure(gpio_dev, INT1_PIN, GPIO_INPUT | GPIO_ACTIVE_LOW) != 0) {
+        LOG_INF("Error: Failed to configure GPIO pin %d.\n", INT1_PIN);
         return;
     }
 
     /* Configure GPIO Interrupt */
     if (gpio_pin_interrupt_configure(gpio_dev, INT1_PIN, GPIO_INT_EDGE_FALLING) != 0) {
-        printk("Error: Failed to configure GPIO interrupt.\n");
+        LOG_INF("Error: Failed to configure GPIO interrupt.\n");
         return;
     }
 
@@ -541,21 +621,17 @@ void lis2dux12_init_interrupt(void) {
         return;
     }
 
-    printk("Interrupt initialized on pin %d.\n", INT1_PIN);
+    LOG_INF("Interrupt initialized on pin %d.\n", INT1_PIN);
 }
 
 
 
 int main(void) {
 
-    gpio_dev = DEVICE_DT_GET(INT1_PORT);
-    if (!device_is_ready(gpio_dev)) {
-        printk("Error: Failed to bind INT1 pin to GPIO device.\n");
-        return -1;
-    }
-
     /* Initialize Sensor */
     lis2dux12_init();
+
+    lis2dux12_init_with_retries();
 
     /* Perform Self-Test */
     perform_self_test();
@@ -567,10 +643,9 @@ int main(void) {
     /* Exit deep power down mode */
     lis2dux12_wakeup(&lis_ctx);
 
-    // Configure motion detection
-    uint16_t motion_threshold_mg = 200;  // User-defined threshold in mg
-    lis2dux12_configure_motion_detection(&lis_ctx, motion_threshold_mg);
-    
+    /* Configure motion detection */
+    lis2dux12_configure_motion_detection(&lis_ctx);
+
     /* Initialize Interrupt */
     lis2dux12_init_interrupt();
 
@@ -581,48 +656,14 @@ int main(void) {
 
         read_lis2dux12_angle(angle_mode);           // Call the function to read angle data
         read_lis2dux12_avg_accel(avg_accel_mode);   // Call the function to read average acceleration data
+        
+        read_switch_monitoring();
 
-        if (motion_detected) {
-
-            uint8_t interrupt_src;
-            lis2dux12_i2c_read(&lis_ctx, LIS2DUX12_ALL_INT_SRC, &interrupt_src, 1);
-            if(interrupt_src == 0x42U) {
-                printk("Activity/Inactivity & Wakeup Event detected: 0x%02X\n", interrupt_src);
-            } else if(interrupt_src == 0x40U) {
-                printk("Activity/Inactivity detected: 0x%02X\n", interrupt_src);
-            } else if(interrupt_src == 0x02U) {
-                printk("Wakeup Event detected: 0x%02X\n", interrupt_src);
-            }
-
-            /* Read Interrupt Source */
-            lis2dux12_all_sources_t int_src;
-            if (lis2dux12_all_sources_get(&lis_ctx, &int_src) == 0) {
-                printk("Interrupt source register: 0x%02X\n", *(uint8_t *)&int_src);
-
-                if (int_src.wake_up) {
-                    printk("Wake-up interrupt detected!\n");
-                }
-                if (int_src.wake_up_x) {
-                    printk("Wake-up interrupt detected on X-Axis!\n");
-                }
-                if (int_src.wake_up_y) {
-                    printk("Wake-up interrupt detected on Y-Axis!\n");
-                }
-                if (int_src.wake_up_z) {
-                    printk("Wake-up interrupt detected on Z-Axis!\n");
-                }
-
-                if (int_src.sleep_state) {
-                    printk("Sleep change detected!\n");
-                }
-            } else {
-                printk("Error: Failed to read interrupt source register.\n");
-            }
-
-            motion_detected = false;  // Clear the flag
-        }
-        k_msleep(1000);
+        // read_vibration_monitoring();
+        
+        k_msleep(2000);
     }
 
     return 0;
 }
+
